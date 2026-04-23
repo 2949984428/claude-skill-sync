@@ -3,7 +3,7 @@
   "name": "Claude Skill Sync",
   "version": "0.1.0",
   "minAppVersion": "1.4.0",
-  "description": "Manage AI coding agent Skills (Claude Code, Codex, Cursor, Gemini, and 14+ more) from your Obsidian vault. One source, symlinked to each tool. Cross-machine sync via your existing vault sync.",
+  "description": "Centralize AI coding agent Skills (Claude Code, Codex, Cursor, Gemini, and 14+ more) in one folder, symlinked to each tool local directory. Bi-directional sync, status dashboard, 18+ presets.",
   "author": "Chocolae",
   "authorUrl": "https://github.com/2949984428",
   "isDesktopOnly": true
