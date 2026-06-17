@@ -4,7 +4,6 @@ An Obsidian plugin that turns your Obsidian vault into the central repository fo
 
 > Core principle: **One Source of Truth (Vault), Multiple Mirrors (Symlinks)**. Edit anywhere and stay instantly synchronized. No duplicated content and no wasted storage space.
 
-![Architecture Diagram](docs/architecture.png)
 
 > Detailed user guide: [docs/USAGE.md](docs/USAGE.md)
 
