@@ -1,93 +1,166 @@
 # Claude Skill Sync
 
-Obsidian 插件 — 把 Obsidian vault 作为 AI agent skill 的中央仓库，一键 symlink 到 Claude Code / Codex / Cursor 等工具的 skill 目录，跨电脑同步交给 vault 自身的 sync 方案。
+An Obsidian plugin that turns your Obsidian vault into the central repository for AI agent skills, allowing one-click symlinking to skill directories used by Claude Code, Codex, Cursor, and other AI tools. Cross-device synchronization is handled entirely by your vault's existing sync solution.
 
-> 配套理念：**单一真身（vault），多处替身（symlink）**。任何位置编辑都即时一致，不复制内容、不占额外空间。
+> Core principle: **One Source of Truth (Vault), Multiple Mirrors (Symlinks)**. Edit anywhere and stay instantly synchronized. No duplicated content and no wasted storage space.
 
-![架构图](docs/architecture.png)
+![Architecture Diagram](docs/architecture.png)
 
-> 详细使用指南：[docs/USAGE.md](docs/USAGE.md)
+> Detailed user guide: [docs/USAGE.md](docs/USAGE.md)
 
-## 安装
+## Installation
 
-### 方式 A：开发者本地（推荐）
+### Option A: Local Developer Setup (Recommended)
 
 ```bash
-# 1. clone 到本地任意位置
+# 1. Clone the repository anywhere on your machine
 git clone https://github.com/<owner>/claude-skill-sync.git ~/Documents/claude-skill-sync
 
-# 2. 在你的 Obsidian vault 里建 symlink 指向它
+# 2. Create a symlink inside your Obsidian vault
 cd /path/to/your-vault
 ln -s ~/Documents/claude-skill-sync .obsidian/plugins/claude-skill-sync
 
-# 3. 启动 Obsidian → 设置 → 第三方插件 → 关闭安全模式 → 启用 Claude Skill Sync
+# 3. Launch Obsidian
+# Settings → Community Plugins → Disable Safe Mode → Enable Claude Skill Sync
 ```
 
-升级：`cd ~/Documents/claude-skill-sync && git pull`，然后在 Obsidian 里重新加载插件即可。
+To update:
 
-### 方式 B：直接复制（最简）
+```bash
+cd ~/Documents/claude-skill-sync
+git pull
+```
 
-把整个目录复制到 vault 内：
+Then reload the plugin from Obsidian.
+
+### Option B: Direct Installation (Simplest)
+
+Clone the repository directly into your vault's plugin directory:
 
 ```bash
 git clone https://github.com/<owner>/claude-skill-sync.git \
   /path/to/your-vault/.obsidian/plugins/claude-skill-sync
 ```
 
-## 启用后
+## Getting Started
 
-1. 设置 → Claude Skill Sync 中确认：
-   - **Vault 内 Skill 根目录**（默认 `Skills`，可改成你 vault 里的实际路径，如 `SkillPack/skills`）
-   - **目标平台**（默认 Claude Code + Codex/Agents，可加任意）
-2. 左侧 ribbon 点插头图标打开侧边栏
-3. 在 vault 的 skill 根目录下放 skill（每个子目录 = 一个 skill，含 `SKILL.md`）
-4. 点"全部安装"——所有 skill symlink 到本机平台目录，AI 工具立即可用
+1. Open **Settings → Claude Skill Sync** and verify:
+   - **Vault Skill Root Directory** (default: `Skills`)
+     - You may change this to your actual skill location, such as `SkillPack/skills`
+   - **Target Platforms**
+     - Defaults to Claude Code and Codex/Agents
+     - Additional platforms can be added freely
 
-## 功能
+2. Click the plug icon in the left ribbon to open the sidebar.
 
-- **侧边栏状态卡**：8 格 grid 显示已同步 / 部分同步 / 未安装 / 待导入 / 指向错误 / 失效 link / 冲突
-- **双向同步**：vault → 平台（install）+ 平台 → vault（import 向导）
-- **失效 link 一键清理**：vault 删了 skill，残留的 symlink 一键扫掉
-- **指向错误一键修复**：vault 路径变了，所有 symlink 一键改指
-- **定时自动同步**（默认 5 分钟）：vault 新 skill 自动安装；平台新真目录默认仅提醒、可选自动导入
-- **启动状态提醒**：打开 Obsidian 弹通知摘要
+3. Create or place skills under your vault's skill root directory.
+   - Each subfolder represents a skill.
+   - Each skill must contain a `SKILL.md` file.
 
-## 工作机制
+4. Click **Install All**.
+   - All skills will be symlinked to the configured platform directories.
+   - The AI tools can use them immediately.
 
-```
-vault/<skillRoot>/<name>/   ← 真身（数据）
+## Features
+
+- **Sidebar Status Dashboard**
+  - 8-state grid showing:
+    - Fully Synced
+    - Partially Synced
+    - Not Installed
+    - Pending Import
+    - Incorrect Target
+    - Broken Symlink
+    - Conflict
+    - Other synchronization states
+
+- **Bi-Directional Synchronization**
+  - Vault → Platform (Install)
+  - Platform → Vault (Import Wizard)
+
+- **One-Click Broken Link Cleanup**
+  - Remove orphaned symlinks when skills are deleted from the vault.
+
+- **One-Click Link Repair**
+  - Automatically fix symlinks when vault paths change.
+
+- **Scheduled Auto Sync**
+  - Default interval: every 5 minutes.
+  - Automatically installs newly created vault skills.
+  - Newly detected platform directories can trigger notifications or optional auto-import.
+
+- **Startup Summary Notifications**
+  - Displays synchronization status when Obsidian launches.
+
+## How It Works
+
+```text
+vault/<skillRoot>/<name>/   ← Source of Truth (Real Data)
               ▲
               │ symlink
               │
-~/.claude/skills/<name>     ← 替身
-~/.agents/skills/<name>     ← 替身
-~/.cursor/skills/<name>     ← 替身（自行添加平台）
+~/.claude/skills/<name>     ← Mirror
+~/.agents/skills/<name>     ← Mirror
+~/.cursor/skills/<name>     ← Mirror (custom platform example)
 ```
 
-所有 AI 工具读取的是同一份内容，跨工具立即一致。
+All AI tools read from the same underlying content, ensuring consistency across platforms.
 
-## 跨电脑同步
+## Multi-Device Synchronization
 
-vault 通过 Obsidian Sync / iCloud / Git / 坚果云等任意方案同步真身；每台电脑上的"替身"由本插件本地建立。
+The vault itself can be synchronized using any preferred method:
 
-`data.json`（每机平台路径）应当**不参与跨机同步**（含 `~`，不同电脑展开后不同；本仓库 `.gitignore` 已忽略）。
+- Obsidian Sync
+- iCloud
+- Git
+- Dropbox
+- OneDrive
+- Synology Drive
+- Nutstore
+- Any other file synchronization service
 
-## 平台支持
+Each computer creates and manages its own local symlinks through Claude Skill Sync.
 
-- ✅ macOS / Linux / Windows 桌面端
-- ❌ 移动端（iOS/Android Obsidian 无 Node fs / symlink 能力，插件 `isDesktopOnly: true`）
+The `data.json` file contains machine-specific platform paths and should **not** be synchronized across devices.
 
-## 配置示例
+Since paths such as `~/.claude/skills` vary between machines, the repository's `.gitignore` already excludes `data.json`.
 
-`data.json`（首次启用后自动生成；勿提交至 git）：
+## Platform Support
+
+- ✅ macOS
+- ✅ Linux
+- ✅ Windows Desktop
+- ❌ Mobile (iOS / Android)
+
+Mobile versions of Obsidian do not support Node.js filesystem APIs or symlink operations. The plugin is therefore configured with:
+
+```json
+"isDesktopOnly": true
+```
+
+## Example Configuration
+
+`data.json` is generated automatically after first launch and should never be committed to Git.
 
 ```json
 {
   "skillRoot": "SkillPack/skills",
   "platforms": [
-    { "name": "Claude Code", "target": "~/.claude/skills", "enabled": true },
-    { "name": "Codex / Agents", "target": "~/.agents/skills", "enabled": true },
-    { "name": "Cursor", "target": "~/.cursor/skills", "enabled": false }
+    {
+      "name": "Claude Code",
+      "target": "~/.claude/skills",
+      "enabled": true
+    },
+    {
+      "name": "Codex / Agents",
+      "target": "~/.agents/skills",
+      "enabled": true
+    },
+    {
+      "name": "Cursor",
+      "target": "~/.cursor/skills",
+      "enabled": false
+    }
   ],
   "notifyOnStartup": true,
   "autoScanIntervalMin": 5,
@@ -96,19 +169,24 @@ vault 通过 Obsidian Sync / iCloud / Git / 坚果云等任意方案同步真身
 }
 ```
 
-## 开发
+## Development
 
-纯 JS，无 build。改 `main.js` → Obsidian 设置里关掉再开启插件即可。
+This plugin is written in plain JavaScript and requires no build process.
 
-```
+After modifying `main.js`:
+
+1. Disable the plugin in Obsidian.
+2. Re-enable the plugin.
+
+```text
 .
-├── manifest.json   # 插件元信息
-├── main.js         # 全部逻辑（~770 行）
-├── styles.css      # 侧边栏样式
-├── data.json       # 用户本地设置（gitignore）
+├── manifest.json   # Plugin metadata
+├── main.js         # Core logic (~770 lines)
+├── styles.css      # Sidebar styling
+├── data.json       # Local user settings (gitignored)
 └── README.md
 ```
 
 ## License
 
-MIT — 见 LICENSE
+MIT License — see `LICENSE` for details.
