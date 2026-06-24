@@ -51,6 +51,7 @@ git clone https://github.com/<owner>/claude-skill-sync.git \
 - **指向错误一键修复**：vault 路径变了，所有 symlink 一键改指
 - **定时自动同步**（默认 5 分钟）：vault 新 skill 自动安装；平台新真目录默认仅提醒、可选自动导入
 - **启动状态提醒**：打开 Obsidian 弹通知摘要
+- **按用量排序**（v0.2.0）：读 Claude Code 会话日志统计每个 Skill 的真实调用次数，侧边栏按热度排序，可选全部历史或最近 N 天
 
 ## 工作机制
 

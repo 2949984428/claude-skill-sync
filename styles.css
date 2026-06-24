@@ -101,25 +101,32 @@
   border-radius: 6px;
 }
 .css-skill-sync .css-search-wrap {
+  position: relative;
   display: flex;
   align-items: center;
-  gap: 6px;
   margin-bottom: 8px;
 }
 .css-skill-sync .css-search-input {
   flex: 1;
   font-size: 12px;
-  padding: 4px 8px;
+  padding: 4px 56px 4px 8px;
   border: 1px solid var(--background-modifier-border);
   border-radius: 4px;
   background: var(--background-primary);
 }
 .css-skill-sync .css-search-count {
-  font-size: 10px;
-  color: var(--text-muted);
+  position: absolute;
+  right: 6px;
+  top: 50%;
+  transform: translateY(-50%);
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--text-normal);
+  background: var(--background-modifier-border);
+  padding: 1px 8px;
+  border-radius: 9px;
   white-space: nowrap;
-  min-width: 30px;
-  text-align: right;
+  pointer-events: none;
 }
 .css-skill-sync .css-skill-list {
   display: flex;
@@ -354,3 +361,88 @@
 .css-add-platform-modal .css-custom-wrap {
   margin-bottom: 10px;
 }
+.css-skill-sync .css-name-link {
+  cursor: pointer;
+}
+.css-skill-sync .css-name-link:hover {
+  color: var(--text-accent);
+  text-decoration: underline;
+}
+.css-skill-sync .css-mtime {
+  font-size: 10px;
+  color: var(--text-faint);
+  flex-shrink: 0;
+  margin-left: auto;
+}
+.css-skill-sync-notice {
+  cursor: pointer;
+}
+
+/* 调用次数统计条：时间段控 + 排序 */
+.css-skill-sync .css-usage-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+/* 段控：全部 / 7天 / 30天 */
+.css-skill-sync .css-seg {
+  display: inline-flex;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.css-skill-sync .css-seg-btn {
+  font-size: 11px;
+  padding: 2px 9px;
+  border: none;
+  border-radius: 0;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  box-shadow: none;
+  cursor: pointer;
+}
+.css-skill-sync .css-seg-btn:not(:last-child) {
+  border-right: 1px solid var(--background-modifier-border);
+}
+.css-skill-sync .css-seg-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.css-skill-sync .css-seg-btn.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+}
+/* 按次数排序 */
+.css-skill-sync .css-sort-btn {
+  margin-left: auto;
+  font-size: 11px;
+  padding: 2px 8px;
+  border: 1px solid var(--background-modifier-border);
+  border-radius: 6px;
+  background: var(--background-primary);
+  color: var(--text-muted);
+  box-shadow: none;
+  cursor: pointer;
+  white-space: nowrap;
+}
+.css-skill-sync .css-sort-btn:hover {
+  background: var(--background-modifier-hover);
+}
+.css-skill-sync .css-sort-btn.is-active {
+  background: var(--interactive-accent);
+  color: var(--text-on-accent);
+  border-color: var(--interactive-accent);
+}
+/* 每个 skill 名字行后的次数徽标（热度四档） */
+.css-skill-sync .css-uc {
+  flex-shrink: 0;
+  margin-left: 6px;
+  font-size: 10px;
+  font-weight: 600;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
+.css-skill-sync .css-uc-hot  { color: var(--color-red, #e5534b); }
+.css-skill-sync .css-uc-warm { color: var(--color-orange, #d2904a); }
+.css-skill-sync .css-uc-cool { color: var(--text-accent); }
+.css-skill-sync .css-uc-zero { color: var(--text-faint); font-weight: 400; }

@@ -38,7 +38,8 @@ const DEFAULT_SETTINGS = {
   notifyOnStartup: true,
   autoScanIntervalMin: 5,
   autoInstall: true,
-  autoImport: false
+  autoImport: false,
+  usageRange: 'all'
 };
 
 function expandHome(p) {
@@ -224,9 +225,14 @@ class SkillSyncPlugin extends obsidian.Plugin {
       if (!e.isDirectory()) continue;
       if (e.name.startsWith('.')) continue;
       const dir = path.join(root, e.name);
-      const skillMd = path.join(dir, 'SKILL.md');
       let description = '';
-      if (await exists(skillMd)) {
+      const dirSt = await lstatSafe(dir);
+      let mtime = dirSt ? dirSt.mtimeMs : 0;
+      for (const fileName of ['SKILL.md', 'skill.md']) {
+        const skillMd = path.join(dir, fileName);
+        const st = await lstatSafe(skillMd);
+        if (!st) continue;
+        if (st.mtimeMs > mtime) mtime = st.mtimeMs;
         try {
           const txt = await fsp.readFile(skillMd, 'utf8');
           const m = txt.match(/^---\n([\s\S]*?)\n---/);
@@ -235,11 +241,72 @@ class SkillSyncPlugin extends obsidian.Plugin {
             if (d) description = d[1].trim();
           }
         } catch {}
+        break;
       }
-      skills.push({ name: e.name, abs: dir, description });
+      skills.push({ name: e.name, abs: dir, description, mtime });
     }
-    skills.sort((a, b) => a.name.localeCompare(b.name));
+    skills.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
     return skills;
+  }
+
+  // 统计每个 skill 在 Claude Code 里的历史调用次数。
+  // 数据源：~/.claude/projects/**/*.jsonl 会话日志，每次调用落一行
+  // "name":"Skill","input":{"skill":"xxx"}。range: 'all' | '7' | '30'（天）。
+  async getSkillUsage(range) {
+    range = range || 'all';
+    if (this._usageCache && this._usageCache.range === range &&
+        (Date.now() - this._usageCache.at) < 60000) {
+      return this._usageCache.map;
+    }
+    const map = new Map();
+    const projectsDir = path.join(os.homedir(), '.claude', 'projects');
+    if (!(await exists(projectsDir))) {
+      this._usageCache = { range, at: Date.now(), map };
+      return map;
+    }
+    let cutoff = 0;
+    if (range !== 'all') {
+      const days = parseInt(range, 10);
+      if (days > 0) cutoff = Date.now() - days * 86400000;
+    }
+    const files = [];
+    const walk = async (dir) => {
+      let entries;
+      try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+      for (const e of entries) {
+        const full = path.join(dir, e.name);
+        if (e.isDirectory()) await walk(full);
+        else if (e.isFile() && e.name.endsWith('.jsonl')) files.push(full);
+      }
+    };
+    await walk(projectsDir);
+    const reSkill = /"name":"Skill","input":\{"skill":"([^"]+)"/;
+    const reTime = /"timestamp":"([^"]+)"/;
+    for (const f of files) {
+      let txt;
+      try { txt = await fsp.readFile(f, 'utf8'); } catch { continue; }
+      const lines = txt.split('\n');
+      for (const line of lines) {
+        if (line.indexOf('"name":"Skill"') === -1) continue;
+        const m = reSkill.exec(line);
+        if (!m) continue;
+        if (cutoff) {
+          const tm = reTime.exec(line);
+          if (tm) {
+            const t = Date.parse(tm[1]);
+            if (t && t < cutoff) continue;
+          }
+        }
+        // 去掉插件命名空间前缀（superpowers:brainstorming -> brainstorming），
+        // 以便和 vault 里的裸目录名对上。
+        let name = m[1];
+        const colon = name.lastIndexOf(':');
+        if (colon !== -1) name = name.slice(colon + 1);
+        map.set(name, (map.get(name) || 0) + 1);
+      }
+    }
+    this._usageCache = { range, at: Date.now(), map };
+    return map;
   }
 
   async getStatus(skill, platform) {
@@ -466,7 +533,12 @@ class SkillSyncPlugin extends obsidian.Plugin {
     if (s.mislinkedSkills > 0) parts.push(`${s.mislinkedSkills} 指向错误`);
     if (s.danglingCount > 0) parts.push(`${s.danglingCount} 失效`);
     if (s.conflictSkills > 0) parts.push(`${s.conflictSkills} 冲突`);
-    new obsidian.Notice(`Skill Sync: ${parts.join(' / ')}（点击查看）`, 8000);
+    const notice = new obsidian.Notice(`Skill Sync: ${parts.join(' / ')}（点击查看）`, 8000);
+    notice.noticeEl.addClass('css-skill-sync-notice');
+    notice.noticeEl.onclick = () => {
+      notice.hide();
+      this.activateView();
+    };
   }
 }
 
@@ -551,33 +623,44 @@ class SkillSyncView extends obsidian.ItemView {
 
   async render() {
     const c = this.containerEl.children[1];
-    c.empty();
-    c.addClass('css-skill-sync');
+    // 整个视图先建进游离容器 wrap，末尾用代际守卫一次性 swap 进 c。
+    // 这样多次 render 重叠时各自写各自的 wrap，只有最新一次能落地，
+    // 不会再往同一容器重复 append（之前会叠出两个搜索框）。
+    const myGen = (this._renderGen = (this._renderGen || 0) + 1);
+    const wrap = createDiv({ cls: 'css-skill-sync' });
+    const commit = () => {
+      if (myGen !== this._renderGen) return false;
+      c.empty();
+      c.addClass('css-skill-sync');
+      c.appendChild(wrap);
+      return true;
+    };
 
-    const header = c.createDiv({ cls: 'css-header' });
+    const header = wrap.createDiv({ cls: 'css-header' });
     header.createEl('h3', { text: 'Claude Skill Sync' });
-    const btnRow = c.createDiv({ cls: 'css-btn-row' });
+    const btnRow = wrap.createDiv({ cls: 'css-btn-row' });
     const refreshBtn = btnRow.createEl('button', { text: '刷新' });
-    refreshBtn.onclick = () => this.render();
+    refreshBtn.onclick = () => { this.plugin._usageCache = null; this.render(); };
     const installAllBtn = btnRow.createEl('button', { text: '全部安装', cls: 'mod-cta' });
     installAllBtn.onclick = async () => { await this.plugin.installAll(); await this.render(); };
     const importBtn = btnRow.createEl('button', { text: '导入现有' });
     importBtn.onclick = () => new ImportModal(this.app, this.plugin).open();
 
     const root = this.plugin.skillRootAbs();
-    c.createDiv({ cls: 'css-meta', text: `Skill 文件夹：${root}` });
+    wrap.createDiv({ cls: 'css-meta', text: `Skill 文件夹：${root}` });
 
-    await this.renderStatusCard(c);
+    await this.renderStatusCard(wrap);
 
     const skills = await this.plugin.listSkills();
     if (skills.length === 0) {
-      const empty = c.createDiv({ cls: 'css-empty' });
+      const empty = wrap.createDiv({ cls: 'css-empty' });
       empty.createEl('div', { text: `还没有任何 Skill。` });
       empty.createEl('div', { text: `在 Obsidian 里创建：${this.plugin.settings.skillRoot}/<skill-name>/SKILL.md` });
+      commit();
       return;
     }
 
-    const searchWrap = c.createDiv({ cls: 'css-search-wrap' });
+    const searchWrap = wrap.createDiv({ cls: 'css-search-wrap' });
     const searchInput = searchWrap.createEl('input', {
       type: 'search',
       cls: 'css-search-input',
@@ -586,16 +669,68 @@ class SkillSyncView extends obsidian.ItemView {
     searchInput.value = this.filterText || '';
     const countEl = searchWrap.createEl('span', { cls: 'css-search-count' });
 
-    const listEl = c.createDiv({ cls: 'css-skill-list' });
+    // 调用次数统计条：时间段控（全部/7天/30天） + 按次数排序
+    const usageRange = this.plugin.settings.usageRange || 'all';
+    const usage = await this.plugin.getSkillUsage(usageRange);
+    const rangeText = (r) => r === 'all' ? '全部历史' : `近 ${r} 天`;
+    let maxCount = 0;
+    usage.forEach(v => { if (v > maxCount) maxCount = v; });
 
-    for (const s of skills) {
+    const usageBar = wrap.createDiv({ cls: 'css-usage-bar' });
+    const seg = usageBar.createDiv({ cls: 'css-seg' });
+    [['all', '全部'], ['7', '7天'], ['30', '30天']].forEach(([v, t]) => {
+      const b = seg.createEl('button', {
+        cls: 'css-seg-btn' + (v === usageRange ? ' is-active' : ''),
+        text: t
+      });
+      b.onclick = async () => {
+        if (this.plugin.settings.usageRange === v) return;
+        this.plugin.settings.usageRange = v;
+        await this.plugin.saveSettings();
+        await this.render();
+      };
+    });
+    const sortBtn = usageBar.createEl('button', {
+      cls: 'css-sort-btn' + (this.sortByUsage ? ' is-active' : ''),
+      text: '↕ 按次数'
+    });
+    sortBtn.setAttribute('title', '按调用次数从高到低排序（再点恢复按修改时间）');
+    sortBtn.onclick = () => { this.sortByUsage = !this.sortByUsage; this.render(); };
+
+    const orderedSkills = this.sortByUsage
+      ? skills.slice().sort((a, b) =>
+          (usage.get(b.name) || 0) - (usage.get(a.name) || 0) || a.name.localeCompare(b.name))
+      : skills;
+
+    const listEl = wrap.createDiv({ cls: 'css-skill-list' });
+
+    for (const s of orderedSkills) {
       const card = listEl.createDiv({ cls: 'css-skill' });
       card.dataset.name = s.name.toLowerCase();
       card.dataset.desc = (s.description || '').toLowerCase();
 
       const nameRow = card.createDiv({ cls: 'css-name-row' });
       const toggle = nameRow.createSpan({ cls: 'css-toggle', text: s.description ? '▸' : ' ' });
-      nameRow.createSpan({ cls: 'css-name', text: s.name });
+      const nameEl = nameRow.createSpan({ cls: 'css-name css-name-link', text: s.name });
+      nameEl.setAttribute('aria-label', '打开 SKILL.md');
+      nameEl.onclick = (e) => {
+        e.stopPropagation();
+        this.openSkillMd(s);
+      };
+      if (s.mtime) {
+        const timeEl = nameRow.createSpan({ cls: 'css-mtime', text: obsidian.moment(s.mtime).fromNow() });
+        timeEl.setAttribute('title', obsidian.moment(s.mtime).format('YYYY-MM-DD HH:mm'));
+      }
+
+      const useCount = usage.get(s.name) || 0;
+      const tier = useCount === 0 ? 'zero'
+        : (maxCount && useCount >= maxCount * 0.66) ? 'hot'
+        : (maxCount && useCount >= maxCount * 0.33) ? 'warm' : 'cool';
+      const useEl = nameRow.createSpan({
+        cls: `css-uc css-uc-${tier}`,
+        text: useCount === 0 ? '○ 0' : `● ${useCount}`
+      });
+      useEl.setAttribute('title', `被调用 ${useCount} 次（Claude Code · ${rangeText(usageRange)}）`);
 
       let descEl = null;
       if (s.description) {
@@ -638,6 +773,9 @@ class SkillSyncView extends obsidian.ItemView {
       }
     }
 
+    // 内容全部建好，最新一次 render 才落地（旧的重叠 render 在此作废）
+    if (!commit()) return;
+
     const filter = (q) => {
       this.filterText = q;
       const ql = (q || '').toLowerCase().trim();
@@ -651,6 +789,19 @@ class SkillSyncView extends obsidian.ItemView {
     };
     searchInput.oninput = (e) => filter(e.target.value);
     filter(this.filterText);
+  }
+
+  async openSkillMd(skill) {
+    const root = this.plugin.settings.skillRoot;
+    for (const fileName of ['SKILL.md', 'skill.md']) {
+      const rel = obsidian.normalizePath(`${root}/${skill.name}/${fileName}`);
+      const file = this.app.vault.getAbstractFileByPath(rel);
+      if (file instanceof obsidian.TFile) {
+        await this.app.workspace.getLeaf(false).openFile(file);
+        return;
+      }
+    }
+    new obsidian.Notice(`${skill.name} 没有 SKILL.md`);
   }
 }
 
