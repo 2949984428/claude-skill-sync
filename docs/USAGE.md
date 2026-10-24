@@ -87,7 +87,8 @@ description: 一句话描述这个 skill 干嘛
 3. 启用插件后状态卡显示「48 未安装」，点「全部安装」即完成
 
 **日常**：
-- A 电脑添加新 skill → vault sync 推到云 → B 电脑拉到 → B 电脑插件 5 分钟内自动安装（默认开启）
+- A 电脑添加新 skill → vault sync 推到云 → B 电脑拉到 → B 电脑插件 5 分钟内自动安装（默认开启；打开 Obsidian 时也会立即同步一次）
+- A 电脑删除 skill / 在某个工具上移除 skill → B 电脑自动清理残留链接 / 同样停用（停用记录在 skill 根目录的 `_skill-sync.json`，随 vault 同步）
 
 ## 侧边栏功能
 

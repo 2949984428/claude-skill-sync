@@ -37,7 +37,7 @@ git clone https://github.com/<owner>/claude-skill-sync.git \
 ## 启用后
 
 1. 设置 → Claude Skill Sync 中确认：
-   - **Vault 内 Skill 根目录**（默认 `Skills`，可改成你 vault 里的实际路径，如 `SkillPack/skills`）
+   - **Vault 内 Skill 根目录**（默认 `Skills`；找不到 Skill 时启动会自动识别，也可手动改成如 `SkillPack/skills`）
    - **目标平台**（默认 Claude Code + Codex/Agents，可加任意）
 2. 左侧 ribbon 点插头图标打开侧边栏
 3. 在 vault 的 skill 根目录下放 skill（每个子目录 = 一个 skill，含 `SKILL.md`）
@@ -51,6 +51,8 @@ git clone https://github.com/<owner>/claude-skill-sync.git \
 - **指向错误一键修复**：vault 路径变了，所有 symlink 一键改指
 - **定时自动同步**（默认 5 分钟）：vault 新 skill 自动安装；平台新真目录默认仅提醒、可选自动导入
 - **启动状态提醒**：打开 Obsidian 弹通知摘要
+- **跨电脑自动联动**（v0.3.0）：启动即同步；新电脑自动识别 Skill 文件夹；换电脑后失效路径自动改指、别处删掉的 Skill 自动清残留链接
+- **按工具停用**（v0.3.0）：在某个工具上「移除」的 Skill 记入 `_skill-sync.json`，不会被自动装回，其他电脑同样生效
 - **按用量排序**（v0.2.0）：读 Claude Code 会话日志统计每个 Skill 的真实调用次数，侧边栏按热度排序，可选全部历史或最近 N 天
 
 ## 工作机制

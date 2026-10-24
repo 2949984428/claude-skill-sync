@@ -7,6 +7,9 @@ const path = require('path');
 const os = require('os');
 
 const VIEW_TYPE = 'claude-skill-sync-view';
+// 跟着 vault 同步的共享配置（放在 Skill 根目录里，跨电脑生效）。
+// 不用点开头：部分同步方案会跳过 dotfile；也不是文件夹，listSkills 不会把它当 Skill。
+const SHARED_FILE = '_skill-sync.json';
 
 const PRESET_PLATFORMS = [
   { name: 'Claude Code', target: '~/.claude/skills' },
@@ -39,6 +42,7 @@ const DEFAULT_SETTINGS = {
   autoScanIntervalMin: 5,
   autoInstall: true,
   autoImport: false,
+  autoCleanup: true,
   usageRange: 'all'
 };
 
@@ -66,6 +70,35 @@ async function isSymlink(p) {
 }
 async function readlinkSafe(p) {
   try { return await fsp.readlink(p); } catch { return null; }
+}
+// 有 SKILL.md 才算 Skill：挡掉空目录、同步到一半只落了文件夹的情况
+async function findSkillMd(dir) {
+  for (const fileName of ['SKILL.md', 'skill.md']) {
+    const p = path.join(dir, fileName);
+    const st = await lstatSafe(p);
+    if (st) return { path: p, st };
+  }
+  return null;
+}
+
+// 读 frontmatter 的 description，兼容 `description: >` / `|` 多行写法和引号包裹
+function parseDescription(txt) {
+  const m = txt.match(/^---\r?\n([\s\S]*?)\r?\n---/);
+  if (!m) return '';
+  const lines = m[1].split(/\r?\n/);
+  const i = lines.findIndex(l => /^description:/.test(l));
+  if (i === -1) return '';
+  let v = lines[i].replace(/^description:\s*/, '').trim();
+  if (v === '' || /^[>|][-+]?$/.test(v)) {
+    const parts = [];
+    for (let j = i + 1; j < lines.length; j++) {
+      if (lines[j].trim() === '') continue;
+      if (!/^\s/.test(lines[j])) break;
+      parts.push(lines[j].trim());
+    }
+    v = parts.join(' ');
+  }
+  return v.replace(/^(['"])([\s\S]*)\1$/, '$2');
 }
 
 class SkillSyncPlugin extends obsidian.Plugin {
@@ -106,8 +139,11 @@ class SkillSyncPlugin extends obsidian.Plugin {
       callback: () => this.repairAllMislinked()
     });
 
-    this.app.workspace.onLayoutReady(() => {
-      setTimeout(() => this.checkAndNotifyOnStartup(), 1500);
+    // 启动即同步：新电脑打开 Obsidian 当场装好，不用等第一个扫描周期
+    this.app.workspace.onLayoutReady(async () => {
+      await this.ensureSkillRoot();
+      await this.autoScanTick();
+      await this.checkAndNotifyOnStartup();
       this.startAutoScan();
     });
   }
@@ -131,44 +167,131 @@ class SkillSyncPlugin extends obsidian.Plugin {
     }
   }
 
+  // 定时 / 启动时的静默同步。顺序有讲究：先修指向失效路径的链接（换电脑后 vault 路径变了），
+  // 再清残留的失效链接（别的电脑删了 Skill），最后补装新 Skill。只在有动作时弹一条汇总。
   async autoScanTick() {
-    let installedN = 0, importedN = 0;
-    if (this.settings.autoInstall) {
-      const skills = await this.listSkills();
-      for (const s of skills) {
-        for (const p of this.settings.platforms) {
-          if (!p.enabled) continue;
-          const st = await this.getStatus(s, p);
-          if (st.state === 'missing') {
-            if (await this.install(s, p)) installedN++;
+    if (this._ticking) return;
+    this._ticking = true;
+    try {
+      let repairedN = 0, cleanedN = 0, installedN = 0, importedN = 0;
+      if (this.settings.autoCleanup) {
+        repairedN = await this.repairAllMislinked({ silent: true, onlyDead: true });
+        cleanedN = await this.cleanupDangling({ silent: true });
+      }
+      if (this.settings.autoInstall) {
+        const skills = await this.listSkills();
+        for (const s of skills) {
+          for (const p of this.settings.platforms) {
+            if (!p.enabled) continue;
+            const st = await this.getStatus(s, p);
+            if (st.state === 'missing') {
+              if (await this.install(s, p, { silent: true })) installedN++;
+            }
           }
         }
       }
-    }
-    if (this.settings.autoImport) {
-      const items = await this.listImportable();
-      for (const it of items) {
-        if (await this.importSkill(it)) importedN++;
-      }
-    }
-    if (installedN > 0 || importedN > 0) {
-      const parts = [];
-      if (installedN > 0) parts.push(`安装 ${installedN}`);
-      if (importedN > 0) parts.push(`导入 ${importedN}`);
-      new obsidian.Notice(`Skill Sync 自动同步：${parts.join(' / ')}`, 6000);
-      this.refreshAllViews();
-    } else if (this.settings.notifyOnStartup) {
-      const s = await this.getSyncSummary();
-      if (s.hasIssue) {
-        const parts = [];
-        if (s.notInstalled > 0) parts.push(`${s.notInstalled} 未安装`);
-        if (s.partiallySynced > 0) parts.push(`${s.partiallySynced} 部分同步`);
-        if (s.importableCount > 0) parts.push(`${s.importableCount} 待导入`);
-        if (parts.length > 0) {
-          new obsidian.Notice(`Skill Sync 状态：${parts.join(' / ')}`, 5000);
+      if (this.settings.autoImport) {
+        const items = await this.listImportable();
+        for (const it of items) {
+          if (await this.importSkill(it)) importedN++;
         }
       }
+      const parts = [];
+      if (installedN > 0) parts.push(`安装 ${installedN}`);
+      if (repairedN > 0) parts.push(`修复 ${repairedN}`);
+      if (cleanedN > 0) parts.push(`清理 ${cleanedN}`);
+      if (importedN > 0) parts.push(`导入 ${importedN}`);
+      if (parts.length > 0) {
+        new obsidian.Notice(`Skill Sync 自动同步：${parts.join(' / ')}`, 6000);
+        this.refreshAllViews();
+      }
+    } finally {
+      this._ticking = false;
     }
+  }
+
+  // 配置的 Skill 文件夹里一个 Skill 都没有时（典型：新电脑用了默认值），
+  // 在 vault 里找"子目录含 SKILL.md 最多"的文件夹自动采用。
+  async ensureSkillRoot() {
+    if ((await this.listSkills()).length > 0) return;
+    const found = await this.detectSkillRoot();
+    if (!found || found === this.settings.skillRoot) return;
+    this.settings.skillRoot = found;
+    await this.saveData(this.settings);
+    new obsidian.Notice(`Skill Sync：已自动识别 Skill 文件夹「${found}」，可在设置里修改`, 8000);
+  }
+
+  async detectSkillRoot() {
+    const base = vaultBasePath(this.app);
+    let best = null, bestN = 0;
+    const walk = async (dir, depth) => {
+      let entries;
+      try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { return; }
+      let n = 0;
+      for (const e of entries) {
+        if (!e.isDirectory() || e.name.startsWith('.') || e.name === 'node_modules') continue;
+        const sub = path.join(dir, e.name);
+        if (await findSkillMd(sub)) n++;
+        else if (depth < 3) await walk(sub, depth + 1);
+      }
+      if (n > bestN && dir !== base) { bestN = n; best = dir; }
+    };
+    await walk(base, 0);
+    return best ? path.relative(base, best) : null;
+  }
+
+  sharedConfigPath() {
+    return path.join(this.skillRootAbs(), SHARED_FILE);
+  }
+
+  async loadShared() {
+    try {
+      const d = JSON.parse(await fsp.readFile(this.sharedConfigPath(), 'utf8'));
+      this.shared = { excluded: (d && d.excluded) || {} };
+    } catch {
+      this.shared = { excluded: {} };
+    }
+  }
+
+  async saveShared() {
+    await fsp.mkdir(this.skillRootAbs(), { recursive: true });
+    await fsp.writeFile(this.sharedConfigPath(), JSON.stringify(this.shared, null, 2) + '\n');
+  }
+
+  // 停用 = 用户主动从某个工具移除了这个 Skill，自动安装不再装回；记在共享配置里，其他电脑同样生效
+  isExcluded(skill, platform) {
+    const list = (this.shared && this.shared.excluded[platform.name]) || [];
+    return list.includes(skill.name);
+  }
+
+  async setExcluded(skill, platform, on) {
+    if (!this.shared) await this.loadShared();
+    const list = new Set(this.shared.excluded[platform.name] || []);
+    if (on === list.has(skill.name)) return;
+    if (on) list.add(skill.name); else list.delete(skill.name);
+    if (list.size) this.shared.excluded[platform.name] = Array.from(list).sort();
+    else delete this.shared.excluded[platform.name];
+    await this.saveShared();
+  }
+
+  async enableFor(skill, platform) {
+    await this.setExcluded(skill, platform, false);
+    return this.install(skill, platform);
+  }
+
+  async disableFor(skill, platform) {
+    const st = await this.getStatus(skill, platform);
+    if (st.state === 'linked' && !(await this.uninstall(skill, platform))) return false;
+    await this.setExcluded(skill, platform, true);
+    return true;
+  }
+
+  // 是不是本插件建的链接：指向当前 Skill 文件夹，或指向别的电脑上同名的 Skill 文件夹路径
+  isOurLink(linkAbs, name) {
+    const rootAbs = path.resolve(this.skillRootAbs());
+    const p = path.resolve(linkAbs);
+    return p.startsWith(rootAbs + path.sep) ||
+      p.endsWith(path.sep + path.join(this.settings.skillRoot, name));
   }
 
   async loadSettings() {
@@ -181,7 +304,9 @@ class SkillSyncPlugin extends obsidian.Plugin {
       notifyOnStartup: data.notifyOnStartup !== false,
       autoScanIntervalMin: typeof data.autoScanIntervalMin === 'number' ? data.autoScanIntervalMin : DEFAULT_SETTINGS.autoScanIntervalMin,
       autoInstall: data.autoInstall !== false,
-      autoImport: data.autoImport === true
+      autoImport: data.autoImport === true,
+      autoCleanup: data.autoCleanup !== false,
+      usageRange: data.usageRange || DEFAULT_SETTINGS.usageRange
     };
   }
 
@@ -220,29 +345,18 @@ class SkillSyncPlugin extends obsidian.Plugin {
     } catch {
       return [];
     }
+    await this.loadShared();
     const skills = [];
     for (const e of entries) {
       if (!e.isDirectory()) continue;
       if (e.name.startsWith('.')) continue;
       const dir = path.join(root, e.name);
-      let description = '';
+      const md = await findSkillMd(dir);
+      if (!md) continue;
       const dirSt = await lstatSafe(dir);
-      let mtime = dirSt ? dirSt.mtimeMs : 0;
-      for (const fileName of ['SKILL.md', 'skill.md']) {
-        const skillMd = path.join(dir, fileName);
-        const st = await lstatSafe(skillMd);
-        if (!st) continue;
-        if (st.mtimeMs > mtime) mtime = st.mtimeMs;
-        try {
-          const txt = await fsp.readFile(skillMd, 'utf8');
-          const m = txt.match(/^---\n([\s\S]*?)\n---/);
-          if (m) {
-            const d = m[1].match(/^description:\s*(.+)$/m);
-            if (d) description = d[1].trim();
-          }
-        } catch {}
-        break;
-      }
+      const mtime = Math.max(dirSt ? dirSt.mtimeMs : 0, md.st.mtimeMs);
+      let description = '';
+      try { description = parseDescription(await fsp.readFile(md.path, 'utf8')); } catch {}
       skills.push({ name: e.name, abs: dir, description, mtime });
     }
     skills.sort((a, b) => b.mtime - a.mtime || a.name.localeCompare(b.name));
@@ -311,7 +425,9 @@ class SkillSyncPlugin extends obsidian.Plugin {
 
   async getStatus(skill, platform) {
     const target = path.join(expandHome(platform.target), skill.name);
-    if (!(await exists(target))) return { state: 'missing', target };
+    if (!(await exists(target))) {
+      return { state: this.isExcluded(skill, platform) ? 'excluded' : 'missing', target };
+    }
     const link = await readlinkSafe(target);
     if (link == null) return { state: 'conflict', target };
     const linkAbs = path.isAbsolute(link) ? link : path.resolve(path.dirname(target), link);
@@ -319,7 +435,8 @@ class SkillSyncPlugin extends obsidian.Plugin {
     return { state: 'mislinked', target, current: linkAbs };
   }
 
-  async install(skill, platform) {
+  // silent：批量 / 自动场景不逐条弹通知，由调用方汇总
+  async install(skill, platform, opts = {}) {
     const targetDir = expandHome(platform.target);
     try {
       await fsp.mkdir(targetDir, { recursive: true });
@@ -331,7 +448,7 @@ class SkillSyncPlugin extends obsidian.Plugin {
     if (await exists(target)) {
       const link = await readlinkSafe(target);
       if (link == null) {
-        new obsidian.Notice(`冲突：${target} 已存在且不是链接，未操作`);
+        if (!opts.silent) new obsidian.Notice(`冲突：${target} 已存在且不是链接，未操作`);
         return false;
       }
       await fsp.unlink(target);
@@ -342,7 +459,7 @@ class SkillSyncPlugin extends obsidian.Plugin {
       new obsidian.Notice(`创建链接失败：${e.message}`);
       return false;
     }
-    new obsidian.Notice(`✓ 已安装 ${skill.name} → ${platform.name}`);
+    if (!opts.silent) new obsidian.Notice(`✓ 已安装 ${skill.name} → ${platform.name}`);
     return true;
   }
 
@@ -380,6 +497,7 @@ class SkillSyncPlugin extends obsidian.Plugin {
         const st = await lstatSafe(full);
         if (!st || st.isSymbolicLink()) continue;
         if (vaultSkills.has(e.name)) continue;
+        if (!(await findSkillMd(full))) continue;
         if (seen.has(e.name)) continue;
         seen.set(e.name, { name: e.name, abs: full, sourcePlatform: p.name });
       }
@@ -398,8 +516,18 @@ class SkillSyncPlugin extends obsidian.Plugin {
     try {
       await fsp.rename(item.abs, dest);
     } catch (e) {
-      new obsidian.Notice(`移动失败 ${item.name}: ${e.message}`);
-      return false;
+      // vault 和工具目录不在同一块盘时 rename 会 EXDEV，退回复制再删除
+      if (e.code !== 'EXDEV') {
+        new obsidian.Notice(`移动失败 ${item.name}: ${e.message}`);
+        return false;
+      }
+      try {
+        await fsp.cp(item.abs, dest, { recursive: true });
+        await fsp.rm(item.abs, { recursive: true, force: true });
+      } catch (e2) {
+        new obsidian.Notice(`移动失败 ${item.name}: ${e2.message}`);
+        return false;
+      }
     }
     const skill = { name: item.name, abs: dest, description: '' };
     for (const p of this.settings.platforms) {
@@ -424,20 +552,23 @@ class SkillSyncPlugin extends obsidian.Plugin {
       new obsidian.Notice('未发现任何 skill');
       return;
     }
-    let added = 0, skipped = 0, conflicts = 0;
+    let added = 0, skipped = 0, conflicts = 0, disabled = 0;
     for (const s of skills) {
       for (const p of this.settings.platforms) {
         if (!p.enabled) continue;
         const st = await this.getStatus(s, p);
         if (st.state === 'linked') { skipped++; continue; }
         if (st.state === 'conflict') { conflicts++; continue; }
-        if (await this.install(s, p)) added++;
+        if (st.state === 'excluded') { disabled++; continue; }
+        if (await this.install(s, p, { silent: true })) added++;
       }
     }
-    new obsidian.Notice(`批量完成：新增 ${added}，已存在 ${skipped}，冲突 ${conflicts}`);
+    const extra = disabled ? `，已停用 ${disabled}` : '';
+    new obsidian.Notice(`批量完成：新增 ${added}，已存在 ${skipped}，冲突 ${conflicts}${extra}`);
     this.refreshAllViews();
   }
 
+  // 只认本插件建的失效链接，工具目录里别人建的链接不碰
   async listDangling() {
     const dangling = [];
     for (const p of this.settings.platforms) {
@@ -455,6 +586,7 @@ class SkillSyncPlugin extends obsidian.Plugin {
           await fsp.stat(full); // 跟随 symlink，失败说明 dangling
         } catch {
           const link = await readlinkSafe(full);
+          if (link == null || !this.isOurLink(path.resolve(dir, link), e.name)) continue;
           dangling.push({ platform: p.name, name: e.name, target: full, points: link });
         }
       }
@@ -462,31 +594,36 @@ class SkillSyncPlugin extends obsidian.Plugin {
     return dangling;
   }
 
-  async cleanupDangling() {
+  async cleanupDangling(opts = {}) {
     const list = await this.listDangling();
     let count = 0;
     for (const d of list) {
       try { await fsp.unlink(d.target); count++; } catch {}
     }
-    new obsidian.Notice(`已清理 ${count} 个失效链接`);
-    this.refreshAllViews();
+    if (!opts.silent) {
+      new obsidian.Notice(`已清理 ${count} 个失效链接`);
+      this.refreshAllViews();
+    }
     return count;
   }
 
-  async repairAllMislinked() {
+  // onlyDead：只修原指向已不存在的链接（换电脑后的旧路径），指向别处真实目录的不自动动
+  async repairAllMislinked(opts = {}) {
     const skills = await this.listSkills();
     let count = 0;
     for (const s of skills) {
       for (const p of this.settings.platforms) {
         if (!p.enabled) continue;
         const st = await this.getStatus(s, p);
-        if (st.state === 'mislinked') {
-          if (await this.install(s, p)) count++;
-        }
+        if (st.state !== 'mislinked') continue;
+        if (opts.onlyDead && (await exists(st.current))) continue;
+        if (await this.install(s, p, { silent: true })) count++;
       }
     }
-    new obsidian.Notice(`已修复 ${count} 个指向错误的链接`);
-    this.refreshAllViews();
+    if (!opts.silent) {
+      new obsidian.Notice(`已修复 ${count} 个指向错误的链接`);
+      this.refreshAllViews();
+    }
     return count;
   }
 
@@ -498,16 +635,19 @@ class SkillSyncPlugin extends obsidian.Plugin {
     let fullySynced = 0, partiallySynced = 0, notInstalled = 0;
     let mislinkedSkills = 0, conflictSkills = 0;
     for (const s of skills) {
-      let linkedN = 0, mislinkedN = 0, conflictN = 0;
+      let linkedN = 0, mislinkedN = 0, conflictN = 0, excludedN = 0;
       for (const p of enabledPlatforms) {
         const st = await this.getStatus(s, p);
         if (st.state === 'linked') linkedN++;
         else if (st.state === 'mislinked') mislinkedN++;
         else if (st.state === 'conflict') conflictN++;
+        else if (st.state === 'excluded') excludedN++;
       }
       if (mislinkedN > 0) mislinkedSkills++;
       if (conflictN > 0) conflictSkills++;
-      if (enabledPlatforms.length > 0 && linkedN === enabledPlatforms.length) fullySynced++;
+      // 停用的工具不算欠账：在所有"该装"的工具上都装好了就算已同步
+      const wantN = enabledPlatforms.length - excludedN;
+      if (enabledPlatforms.length > 0 && linkedN === wantN) fullySynced++;
       else if (linkedN > 0) partiallySynced++;
       else notInstalled++;
     }
@@ -754,15 +894,16 @@ class SkillSyncView extends obsidian.ItemView {
         row.createSpan({ cls: 'css-plat', text: p.name });
 
         const status = await this.plugin.getStatus(s, p);
-        const labels = { linked: '已安装', missing: '未安装', conflict: '冲突', mislinked: '指向其他' };
+        const labels = { linked: '已安装', missing: '未安装', excluded: '已停用', conflict: '冲突', mislinked: '指向其他' };
         row.createSpan({ cls: `css-badge css-${status.state}`, text: labels[status.state] || status.state });
 
         if (status.state === 'linked') {
           const btn = row.createEl('button', { text: '移除' });
-          btn.onclick = async () => { await this.plugin.uninstall(s, p); await this.render(); };
-        } else if (status.state === 'missing') {
-          const btn = row.createEl('button', { text: '安装', cls: 'mod-cta' });
-          btn.onclick = async () => { await this.plugin.install(s, p); await this.render(); };
+          btn.title = '断开链接并停用：自动同步不会再装回，其他电脑也一样';
+          btn.onclick = async () => { await this.plugin.disableFor(s, p); await this.render(); };
+        } else if (status.state === 'missing' || status.state === 'excluded') {
+          const btn = row.createEl('button', { text: status.state === 'excluded' ? '启用' : '安装', cls: 'mod-cta' });
+          btn.onclick = async () => { await this.plugin.enableFor(s, p); await this.render(); };
         } else if (status.state === 'mislinked') {
           row.createSpan({ cls: 'css-warn', text: `→ ${status.current}` });
           const btn = row.createEl('button', { text: '改指向' });
@@ -814,6 +955,8 @@ class SkillSyncSettingTab extends obsidian.PluginSettingTab {
   display() {
     const { containerEl } = this;
     containerEl.empty();
+    // 文本框失焦再保存：每敲一个字就保存会重启扫描、重绘侧边栏，半截路径还会被当成真路径
+    const saveOnBlur = (t) => t.inputEl.addEventListener('blur', () => this.plugin.saveSettings());
     containerEl.createEl('h2', { text: 'Claude Skill Sync' });
 
     new obsidian.Setting(containerEl)
@@ -831,14 +974,15 @@ class SkillSyncSettingTab extends obsidian.PluginSettingTab {
     new obsidian.Setting(containerEl)
       .setName('定时扫描间隔（分钟）')
       .setDesc('后台每隔多少分钟自动检查一次。0 = 关闭定时扫描。建议 5-30。')
-      .addText(t => t
-        .setPlaceholder('5')
-        .setValue(String(this.plugin.settings.autoScanIntervalMin))
-        .onChange(async v => {
-          const n = parseInt(v, 10);
-          this.plugin.settings.autoScanIntervalMin = isNaN(n) ? 0 : Math.max(0, n);
-          await this.plugin.saveSettings();
-        }));
+      .addText(t => {
+        t.setPlaceholder('5')
+          .setValue(String(this.plugin.settings.autoScanIntervalMin))
+          .onChange(v => {
+            const n = parseInt(v, 10);
+            this.plugin.settings.autoScanIntervalMin = isNaN(n) ? 0 : Math.max(0, n);
+          });
+        saveOnBlur(t);
+      });
 
     new obsidian.Setting(containerEl)
       .setName('自动安装新 Skill 到 Coding 工具')
@@ -847,6 +991,16 @@ class SkillSyncSettingTab extends obsidian.PluginSettingTab {
         .setValue(this.plugin.settings.autoInstall)
         .onChange(async v => {
           this.plugin.settings.autoInstall = v;
+          await this.plugin.saveSettings();
+        }));
+
+    new obsidian.Setting(containerEl)
+      .setName('自动修复和清理链接')
+      .setDesc('扫描时自动改指向已失效路径的链接（换电脑后 vault 路径变了），并清掉源 Skill 已删除的残留链接。只处理本插件建的链接。')
+      .addToggle(tg => tg
+        .setValue(this.plugin.settings.autoCleanup)
+        .onChange(async v => {
+          this.plugin.settings.autoCleanup = v;
           await this.plugin.saveSettings();
         }));
 
@@ -863,14 +1017,15 @@ class SkillSyncSettingTab extends obsidian.PluginSettingTab {
 
     new obsidian.Setting(containerEl)
       .setName('Obsidian 中的 Skill 文件夹')
-      .setDesc('相对 Obsidian 根的路径。下面每个子文件夹视为一个 Skill。')
-      .addText(t => t
-        .setPlaceholder('Skills')
-        .setValue(this.plugin.settings.skillRoot)
-        .onChange(async v => {
-          this.plugin.settings.skillRoot = (v || '').trim() || 'Skills';
-          await this.plugin.saveSettings();
-        }));
+      .setDesc('相对 Obsidian 根的路径。下面每个含 SKILL.md 的子文件夹视为一个 Skill。留空或找不到 Skill 时，启动会自动识别。')
+      .addText(t => {
+        t.setPlaceholder('Skills')
+          .setValue(this.plugin.settings.skillRoot)
+          .onChange(v => {
+            this.plugin.settings.skillRoot = (v || '').trim().replace(/\/+$/, '') || 'Skills';
+          });
+        saveOnBlur(t);
+      });
 
     containerEl.createEl('h3', { text: 'Coding 工具' });
     containerEl.createDiv({ cls: 'setting-item-description', text: '安装 = 让 Coding 工具能读到 Obsidian 里的 Skill。路径里 ~ 会自动展开成你的 home 目录。' });
@@ -879,20 +1034,18 @@ class SkillSyncSettingTab extends obsidian.PluginSettingTab {
       const wrap = containerEl.createDiv({ cls: 'css-platform-edit' });
       new obsidian.Setting(wrap)
         .setName(p.name || '(未命名)')
-        .addText(t => t
-          .setPlaceholder('名称')
-          .setValue(p.name)
-          .onChange(async v => {
-            this.plugin.settings.platforms[idx].name = v;
-            await this.plugin.saveSettings();
-          }))
-        .addText(t => t
-          .setPlaceholder('~/.claude/skills')
-          .setValue(p.target)
-          .onChange(async v => {
-            this.plugin.settings.platforms[idx].target = v.trim();
-            await this.plugin.saveSettings();
-          }))
+        .addText(t => {
+          t.setPlaceholder('名称')
+            .setValue(p.name)
+            .onChange(v => { this.plugin.settings.platforms[idx].name = v; });
+          saveOnBlur(t);
+        })
+        .addText(t => {
+          t.setPlaceholder('~/.claude/skills')
+            .setValue(p.target)
+            .onChange(v => { this.plugin.settings.platforms[idx].target = v.trim(); });
+          saveOnBlur(t);
+        })
         .addToggle(tg => tg
           .setValue(p.enabled)
           .setTooltip('启用')
